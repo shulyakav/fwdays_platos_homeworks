@@ -235,7 +235,7 @@ export const stackInfo = {
 ### **Step 1: Create Development Stack**
 ```sh
 # Create and deploy dev stack
-pulumi stack init dev
+pulumi stack init dev #if dev already exists - just run next command
 pulumi up --yes
 ```
 
