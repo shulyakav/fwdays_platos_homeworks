@@ -22,12 +22,23 @@ Ensure you have the following installed:
 
 #### **1. Install Pulumi**
 ```sh
+# On macOS
+brew install pulumi
+
+# On Linux/Windows
 curl -fsSL https://get.pulumi.com | sh
 ```
 
 #### **2. Verify Installation**
 ```sh
 pulumi version
+docker --version
+node --version
+```
+
+#### **3. Login to Pulumi (Local Backend)**
+```sh
+pulumi login --local
 ```
 
 ---
@@ -37,104 +48,304 @@ pulumi version
 ### **Step 1: Initialize the Project**
 ```sh
 mkdir pulumi-docker-demo && cd pulumi-docker-demo
-pulumi new docker-typescript
+
+# Use typescript template (docker-typescript doesn't exist)
+pulumi new typescript --name pulumi-docker-demo
 ```
 
 ### **Step 2: Install Required Pulumi Packages**
 ```sh
-npm install @pulumi/docker
+npm install @pulumi/docker @pulumi/pulumi
+```
+
+### **Step 3: Update package.json**
+Ensure your `package.json` includes:
+```json
+{
+    "name": "pulumi-docker-demo",
+    "main": "index.js",
+    "devDependencies": {
+        "@types/node": "^16"
+    },
+    "dependencies": {
+        "@pulumi/pulumi": "^3.0.0",
+        "@pulumi/docker": "^4.0.0"
+    }
+}
 ```
 
 ---
 
 ## **Part 3: Implement the Web Application Stack**
 
-### **Modify `index.ts`**
-Replace the contents with:
+### **Replace `index.ts` contents:**
 
 ```typescript
 import * as pulumi from "@pulumi/pulumi";
 import * as docker from "@pulumi/docker";
 
+// Configuration
+const config = new pulumi.Config();
+const stackName = pulumi.getStack();
+
 class WebAppStack extends pulumi.ComponentResource {
+    public nginxContainer: docker.Container;
+    public redisContainer: docker.Container;
+    
     constructor(name: string, port: number, opts?: pulumi.ComponentResourceOptions) {
         super("custom:resource:WebAppStack", name, {}, opts);
 
-        // Create a Docker network
+        // Create a Docker network for this stack
         const network = new docker.Network(`${name}-network`, {
             name: `webapp-network-${name}`,
+            driver: "bridge",
+        }, { parent: this });
+
+        // Pull Redis image
+        const redisImage = new docker.RemoteImage(`${name}-redis-image`, {
+            name: "redis:7-alpine",
+            keepLocally: true,
         }, { parent: this });
 
         // Create Redis container
-        const redisImage = new docker.RemoteImage(`${name}-redis-image`, {
-            name: "redis:latest",
-        }, { parent: this });
-
-        const redisContainer = new docker.Container(`${name}-redis`, {
+        this.redisContainer = new docker.Container(`${name}-redis`, {
+            name: `redis-${name}`,
             image: redisImage.imageId,
-            networksAdvanced: [{ name: network.name }],
-            ports: [{ internal: 6379, external: port + 1000 }],
+            networksAdvanced: [{ 
+                name: network.name,
+                aliases: ["redis"]
+            }],
+            ports: [{ 
+                internal: 6379, 
+                external: port + 1000 
+            }],
+            restart: "unless-stopped",
         }, { parent: this });
 
-        // Create Nginx container
+        // Pull Nginx image
         const nginxImage = new docker.RemoteImage(`${name}-nginx-image`, {
-            name: "nginx:latest",
+            name: "nginx:alpine",
+            keepLocally: true,
         }, { parent: this });
 
-        new docker.Container(`${name}-nginx`, {
+        // Create custom Nginx configuration
+        const nginxConfig = `
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream redis_backend {
+        server redis:6379;
+    }
+    
+    server {
+        listen 80;
+        location / {
+            root /usr/share/nginx/html;
+            index index.html;
+        }
+        
+        location /health {
+            access_log off;
+            return 200 "healthy\\n";
+            add_header Content-Type text/plain;
+        }
+    }
+}`;
+
+        // Create Nginx container with custom config
+        this.nginxContainer = new docker.Container(`${name}-nginx`, {
+            name: `nginx-${name}`,
             image: nginxImage.imageId,
-            networksAdvanced: [{ name: network.name }],
-            ports: [{ internal: 80, external: port }],
-            envs: [`REDIS_HOST=${redisContainer.name}`],
+            networksAdvanced: [{ 
+                name: network.name 
+            }],
+            ports: [{ 
+                internal: 80, 
+                external: port 
+            }],
+            envs: [
+                `REDIS_HOST=redis`,
+                `STACK_NAME=${name}`,
+                `PORT=${port}`
+            ],
+            uploads: [{
+                content: nginxConfig,
+                file: "/etc/nginx/nginx.conf"
+            }, {
+                content: `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pulumi Docker Demo - ${name}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .header { color: #2563eb; border-bottom: 2px solid #2563eb; padding-bottom: 10px; }
+        .info { margin: 20px 0; padding: 15px; background: #eff6ff; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="header">🚀 Pulumi Docker Demo</h1>
+        <div class="info">
+            <h2>Stack: ${name}</h2>
+            <p><strong>Port:</strong> ${port}</p>
+            <p><strong>Redis Port:</strong> ${port + 1000}</p>
+            <p><strong>Status:</strong> ✅ Running</p>
+        </div>
+        <p>This Nginx server is running in a Docker container managed by Pulumi!</p>
+        <p>Redis is available at: redis:6379 (internal network)</p>
+        <p><a href="/health">Health Check</a></p>
+    </div>
+</body>
+</html>`,
+                file: "/usr/share/nginx/html/index.html"
+            }],
+            restart: "unless-stopped",
         }, { parent: this });
+
+        // Register outputs
+        this.registerOutputs({
+            nginxContainerId: this.nginxContainer.id,
+            redisContainerId: this.redisContainer.id,
+            networkId: network.id,
+        });
     }
 }
 
-// Create two stacks
-const stack1 = new WebAppStack("stack1", 8081);
-const stack2 = new WebAppStack("stack2", 8082);
+// Create the web application stack based on Pulumi stack name
+const webApp = new WebAppStack(stackName, stackName === "prod" ? 8080 : 8081);
+
+// Export useful information
+export const nginxUrl = pulumi.interpolate`http://localhost:${stackName === "prod" ? 8080 : 8081}`;
+export const redisPort = stackName === "prod" ? 7080 : 7081;
+export const stackInfo = {
+    name: stackName,
+    nginxContainer: webApp.nginxContainer.name,
+    redisContainer: webApp.redisContainer.name,
+};
 ```
 
 ---
 
-## **Part 4: Deploy the Web Application Stacks**
+## **Part 4: Create and Deploy Multiple Stacks**
 
-### **Step 1: Install Dependencies**
+### **Step 1: Create Development Stack**
 ```sh
-npm install
+# Create and deploy dev stack
+pulumi stack init dev
+pulumi up --yes
 ```
 
-### **Step 2: Deploy Both Stacks**
+### **Step 2: Create Production Stack**
 ```sh
+# Create and deploy prod stack
+pulumi stack init prod
 pulumi up --yes
+```
+
+### **Step 3: Check Stack Status**
+```sh
+# List all stacks
+pulumi stack ls
+
+# Get outputs from current stack
+pulumi stack output
+
+# Switch between stacks
+pulumi stack select dev
+pulumi stack select prod
 ```
 
 ---
 
 ## **Part 5: Verification**
 
-### **1. Check Running Containers**
+### **Step 1: Check Running Containers**
 ```sh
 docker ps
 ```
-You should see two Nginx containers and two Redis containers running.
+You should see containers running for both stacks.
 
-### **2. Access Web Application**
+### **Step 2: Access Web Applications**
 Open your browser and navigate to:
-- **StackOne:** [http://localhost:8081](http://localhost:8081)
-- **StackTwo:** [http://localhost:8082](http://localhost:8082)
+- **Development Stack:** [http://localhost:8081](http://localhost:8081)
+- **Production Stack:** [http://localhost:8080](http://localhost:8080)
 
-### **3. Destroy the Deployment**
-Once you're done, clean up the environment:
+### **Step 3: Test Health Endpoints**
 ```sh
-pulumi destroy --yes
+# Test dev stack
+curl http://localhost:8081/health
+
+# Test prod stack  
+curl http://localhost:8080/health
+```
+
+### **Step 4: Check Redis Connectivity**
+```sh
+# Connect to Redis in dev stack
+docker exec -it redis-dev redis-cli ping
+
+# Connect to Redis in prod stack
+docker exec -it redis-prod redis-cli ping
 ```
 
 ---
 
-## **Submission**
-- Take screenshots of the running web applications.
-- Include your **Pulumi TypeScript files**.
-- Write a short reflection on any challenges faced and how you resolved them.
+## **Part 6: Stack Management**
 
-**Happy Deploying! 🚀**
+### **Step 1: View Stack Differences**
+```sh
+# Compare stacks
+pulumi stack select dev
+pulumi stack output
+
+pulumi stack select prod  
+pulumi stack output
+```
+
+### **Step 2: Update Configuration**
+```sh
+# Add configuration to a stack
+pulumi config set description "Development environment"
+pulumi up --yes
+```
+
+### **Step 3: Clean Up**
+```sh
+# Destroy dev stack
+pulumi stack select dev
+pulumi destroy --yes
+
+# Destroy prod stack
+pulumi stack select prod
+pulumi destroy --yes
+
+# Remove stacks (optional)
+pulumi stack rm dev --yes
+pulumi stack rm prod --yes
+```
+
+---
+
+## **Part 7: Troubleshooting**
+
+### **Common Issues and Solutions:**
+
+1. **"docker-typescript template not found"**
+   - Use `pulumi new typescript` instead
+   - Manually install `@pulumi/docker` package
+
+2. **Containers not starting**
+   - Check Docker daemon is running: `docker info`
+   - View container logs: `docker logs <container-name>`
+
+3. **Port conflicts**
+   - Ensure ports 8080, 8081, 7080, 7081 are available
+   - Use `netstat -an | grep LISTEN` to check
+
+4. **Permission errors**
+   - Ensure Docker is running and accessible
+   - On Linux, add user to docker group: `sudo usermod -aG docker $USER`
