@@ -15,6 +15,7 @@ In this assignment, you will:
 Ensure you have the following installed:
 - **Docker**
 - **kubectl**
+- **minikube**
 - **Operator SDK**
 - **go (v1.19+)**
 
